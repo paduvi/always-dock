@@ -1,0 +1,133 @@
+# AlwaysDock
+
+The macOS Dock shows on **one** display at a time and hides in full-screen apps, and Apple offers no setting to change that. AlwaysDock draws its own dock, which looks and behaves like the real one, on **every display** and every Space, including full-screen apps.
+
+## Features
+
+- A separate dock on each display. It updates on its own when you connect or disconnect a display.
+- Visible on every Space and in full-screen apps, and stays put in Mission Control.
+- The app list comes from the system Dock: Finder, your pinned apps (in the same order), a separator, then running apps that are not pinned. It re-syncs every 3 seconds.
+- A small dot under each running app. Hovering an icon shows the app's name in a bubble.
+- Click to launch an app or bring it to the front. If the app has no windows left, it opens a new one, like the Dock does.
+- Right-click (or Control-click) for a menu: Open, Show in Finder, Hide/Show, Quit. Hold ⌥ to turn Quit into Force Quit.
+- Drop files on an icon to open them with that app.
+- Liquid Glass background on macOS 26 and later, vibrancy on older versions. Follows light and dark mode.
+- Can sit on the bottom, left or right edge. Icons shrink to fit when space runs out.
+- Optional space reservation: zoomed (Zoom/Fill) and tiled windows are not covered by the dock.
+
+## Requirements
+
+- macOS 13 or later.
+- Xcode or the Command Line Tools (install with `xcode-select --install`).
+
+## Build and run
+
+```bash
+./build.sh
+```
+
+```bash
+open build/AlwaysDock.app
+```
+
+To install the app and launch it (recommended if you want Open at Login):
+
+```bash
+./build.sh --install
+```
+
+The app goes into `/Applications`. If you have no admin rights, meaning `/Applications` is not writable, the script installs into your `~/Applications` instead. To install somewhere else, pass a folder (it is created if missing):
+
+```bash
+./build.sh --install ~/Tools
+```
+
+The running copy quits cleanly and is replaced by the new one. If an old copy is still in `/Applications` or `~/Applications`, the script tells you so you can delete it and avoid launching the old version.
+
+During development you can run it without packaging a `.app`. Open at Login does not work this way:
+
+```bash
+swift run
+```
+
+## Usage
+
+AlwaysDock has no icon in the Dock. All settings are under the dock icon in the menu bar:
+
+| Item | What it does |
+| --- | --- |
+| **Hide System Dock** | Hides the macOS Dock completely so AlwaysDock takes over on every display. Quitting AlwaysDock brings the system Dock back. |
+| **Reserve Space for Dock** | Zoomed and tiled windows shrink so the dock does not cover them. Requires Accessibility access (see below). |
+| **Icon Size** | Small (40), Medium (48), Large (64). |
+| **Position** | Bottom, Left, Right. Defaults to wherever the system Dock is. |
+| **Open at Login** | Starts AlwaysDock when you log in. Only available when running from `AlwaysDock.app`. |
+| **Quit AlwaysDock** | ⌘Q |
+
+### Two modes
+
+1. **Default (Hide System Dock off)**: AlwaysDock steps aside on the display that currently has the system Dock and shows only on the others. When the system Dock moves to another display, AlwaysDock follows within about a second. In this mode, full-screen apps on the display with the system Dock have no dock.
+2. **Hide System Dock on** (recommended): AlwaysDock is on **every** display, including the main display and full-screen apps.
+
+### Reserve Space for Dock
+
+The real Dock reserves space by shrinking the screen's usable area (`visibleFrame`), so macOS knows how far a window may zoom. Only macOS can do that; third-party apps cannot. So AlwaysDock does what window managers such as Rectangle and Amethyst do: it watches windows through the Accessibility API, and when a window **is resized or opens** overlapping the dock's strip, it shrinks the window to fit.
+
+- Zoom, Fill, tiling and dragging a window edge into the dock strip all end in a resize, so they all get adjusted. When you drag an edge, AlwaysDock waits until you release the mouse.
+- Just **moving** a window (no resize) is left alone. You can still place a window over the dock if you want, like with the real Dock.
+- Full-screen windows, minimized windows, sheets and panels are never adjusted. The display that has the system Dock is not touched either, since macOS already handles it.
+- When you turn the option on, or change the dock's size or position, windows that are already open are checked again.
+
+**Granting access:** turn on Reserve Space for Dock. macOS asks for permission; open System Settings → Privacy & Security → Accessibility and turn on AlwaysDock. On macOS 27 that list is called **Device Control and Data Access** instead of Accessibility. While it waits, the menu item reads "(waiting for Accessibility access)" and an **Open Accessibility Settings…** item below it jumps straight to the right list. Once access is granted the feature starts on its own, without relaunching the app.
+
+You can also open the list from Terminal:
+
+```bash
+open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility"
+```
+
+**After a rebuild:** `build.sh` signs the app ad-hoc, so after every build macOS treats it as a new app and the old Accessibility grant stops working. The switch in System Settings may still show as on but has no effect. Remove AlwaysDock from the list (the − button) and grant access again, or reset the stale entry from Terminal and let AlwaysDock ask again:
+
+```bash
+tccutil reset Accessibility com.vietphan.AlwaysDock
+```
+
+If you have a code signing certificate, build with it and the grant survives rebuilds:
+
+```bash
+SIGN_IDENTITY="Apple Development: Your Name (XXXXXXXXXX)" ./build.sh --install
+```
+
+## How it works
+
+- Each display gets a borderless `NSPanel` that never takes focus (`nonactivatingPanel`). The panel sits at the same window level as the real Dock (`kCGDockWindowLevel`), with a `collectionBehavior` of `canJoinAllSpaces`, `fullScreenAuxiliary` and `stationary`.
+- Pinned apps are read from the `persistent-apps` key in `com.apple.dock`. Running apps come from `NSWorkspace`.
+- To find the display the system Dock is on, AlwaysDock looks for the display whose `visibleFrame` is inset on the bottom, left or right edge.
+- Hide System Dock uses a well-known trick: turn on auto-hide with a 1000-second delay (`autohide-delay`) and restart the Dock. Your original values are saved and restored when you turn the option off or quit the app.
+
+## Limitations
+
+- macOS does not let third-party apps reserve screen space the way the real Dock does. Reserve Space for Dock makes up for it by adjusting windows *after* they resize, so you may see a window zoom all the way and then shrink. Some apps enforce a minimum size or refuse resizing through Accessibility; AlwaysDock skips those.
+- Full-screen apps are still partly covered by AlwaysDock at the bottom, because full-screen windows cannot be resized.
+- Pinning, unpinning and reordering apps is still done in the system Dock. While the system Dock is hidden, press ⌥⌘D to show it temporarily, then press ⌥⌘D again to hide it.
+- Not supported yet: badges, minimized windows, folders (Stacks), the Trash, hover magnification.
+- If AlwaysDock is killed abruptly (a crash, `kill -9`) while the system Dock is hidden, open AlwaysDock again and turn the option off, or run this to get the Dock back:
+
+```bash
+defaults delete com.apple.dock autohide-delay; defaults write com.apple.dock autohide -bool false; killall Dock
+```
+
+## Source code
+
+| File | Contents |
+| --- | --- |
+| `Sources/AlwaysDock/main.swift` | Starts the app as a menu-bar-only app. |
+| `Sources/AlwaysDock/AppDelegate.swift` | Creates a dock per display, tracks display changes, the menu bar menu. |
+| `Sources/AlwaysDock/DockPanelController.swift` | Builds and positions the dock on one display. |
+| `Sources/AlwaysDock/Views.swift` | The panel window, glass background, icon tiles, separator, app-name bubble. |
+| `Sources/AlwaysDock/DockModel.swift` | The app list (pinned and running); launching and activating apps. |
+| `Sources/AlwaysDock/SystemDock.swift` | Reads the system Dock's settings; hides and restores the system Dock. |
+| `Sources/AlwaysDock/WindowGuard.swift` | Reserve Space for Dock: watches other apps' windows through the Accessibility API and shrinks them. |
+| `Sources/AlwaysDock/Settings.swift` | Stores user settings. |
+| `build.sh` | Packages `build/AlwaysDock.app` (signed ad-hoc, or with `SIGN_IDENTITY`). With `--install [DIR]`: quits the running copy cleanly, installs into `/Applications` (or `~/Applications`, or `DIR`) and launches it. |
+| `Resources/AppIcon.icns` | The app icon. |
+| `Scripts/make-icon.swift` | Draws the icon in code and regenerates `AppIcon.icns`: `swift Scripts/make-icon.swift`. |
