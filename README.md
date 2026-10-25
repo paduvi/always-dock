@@ -13,6 +13,7 @@
   <img src="https://img.shields.io/badge/macOS-13%2B-blue" alt="macOS 13+">
   <img src="https://img.shields.io/badge/Swift-5.9%2B-orange" alt="Swift 5.9+">
   <img src="https://img.shields.io/badge/multi--monitor-supported-brightgreen" alt="Multi-monitor supported">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License"></a>
 </p>
 
 The macOS Dock shows on **one** display at a time and hides in full-screen apps, and Apple offers no setting to change that. AlwaysDock draws its own dock, which looks and behaves like the real one, on **every display** and every Space, including full-screen apps.
@@ -147,3 +148,7 @@ defaults delete com.apple.dock autohide-delay; defaults write com.apple.dock aut
 | `Resources/AppIcon.icns` | The app icon. |
 | `Scripts/make-icon.swift` | Draws the icon in code and regenerates `AppIcon.icns`: `swift Scripts/make-icon.swift`. |
 | `docs/icon.png` | The icon as a PNG, for this README. |
+
+## License
+
+AlwaysDock is free and open source under the [MIT License](LICENSE).
