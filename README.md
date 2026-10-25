@@ -1,4 +1,19 @@
-# AlwaysDock
+<p align="center">
+  <img src="docs/icon.png" width="128" height="128" alt="AlwaysDock icon">
+</p>
+
+<h1 align="center">AlwaysDock</h1>
+
+<p align="center">
+  <b>Show the macOS Dock on every display.</b><br>
+  A Dock replacement for multi-monitor Macs that stays visible on all screens, every Space and full-screen apps.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-13%2B-blue" alt="macOS 13+">
+  <img src="https://img.shields.io/badge/Swift-5.9%2B-orange" alt="Swift 5.9+">
+  <img src="https://img.shields.io/badge/multi--monitor-supported-brightgreen" alt="Multi-monitor supported">
+</p>
 
 The macOS Dock shows on **one** display at a time and hides in full-screen apps, and Apple offers no setting to change that. AlwaysDock draws its own dock, which looks and behaves like the real one, on **every display** and every Space, including full-screen apps.
 
@@ -131,3 +146,4 @@ defaults delete com.apple.dock autohide-delay; defaults write com.apple.dock aut
 | `build.sh` | Packages `build/AlwaysDock.app` (signed ad-hoc, or with `SIGN_IDENTITY`). With `--install [DIR]`: quits the running copy cleanly, installs into `/Applications` (or `~/Applications`, or `DIR`) and launches it. |
 | `Resources/AppIcon.icns` | The app icon. |
 | `Scripts/make-icon.swift` | Draws the icon in code and regenerates `AppIcon.icns`: `swift Scripts/make-icon.swift`. |
+| `docs/icon.png` | The icon as a PNG, for this README. |
