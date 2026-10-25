@@ -104,7 +104,7 @@ open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Pri
 **After a rebuild:** `build.sh` signs the app ad-hoc, so after every build macOS treats it as a new app and the old Accessibility grant stops working. The switch in System Settings may still show as on but has no effect. Remove AlwaysDock from the list (the − button) and grant access again, or reset the stale entry from Terminal and let AlwaysDock ask again:
 
 ```bash
-tccutil reset Accessibility com.vietphan.AlwaysDock
+tccutil reset Accessibility io.dogy.AlwaysDock
 ```
 
 If you have a code signing certificate, build with it and the grant survives rebuilds:
