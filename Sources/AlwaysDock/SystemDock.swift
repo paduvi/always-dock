@@ -1,16 +1,18 @@
 import AppKit
+import os
 
 /// Reads and tweaks the system Dock through its preferences domain (com.apple.dock).
 @MainActor
 enum SystemDock {
-    private static let domain = "com.apple.dock"
+    private static let domain = "com.apple.dock" as CFString
     private static let savedStateKey = "savedSystemDockState"
     /// An auto-hide delay this long means the system Dock never slides back in.
     private static let hiddenDelay = 1000.0
+    private static let log = Logger(subsystem: "io.dogy.AlwaysDock", category: "SystemDock")
 
     static func value(_ key: String) -> Any? {
-        CFPreferencesAppSynchronize(domain as CFString)
-        return CFPreferencesCopyAppValue(key as CFString, domain as CFString)
+        CFPreferencesAppSynchronize(domain)
+        return CFPreferencesCopyAppValue(key as CFString, domain)
     }
 
     static var orientation: String { value("orientation") as? String ?? "bottom" }
@@ -42,34 +44,38 @@ enum SystemDock {
             saved["autohide-delay"] = value("autohide-delay")
             defaults.set(saved, forKey: savedStateKey)
         }
-        run("/usr/bin/defaults", "write", domain, "autohide", "-bool", "true")
-        run("/usr/bin/defaults", "write", domain, "autohide-delay", "-float", "\(hiddenDelay)")
-        run("/usr/bin/killall", "Dock")
+        apply(["autohide": true, "autohide-delay": hiddenDelay])
+        log.notice("Hid the system Dock")
     }
 
     static func restore() {
         let defaults = UserDefaults.standard
         guard let saved = defaults.dictionary(forKey: savedStateKey) else { return }
-        if let autohide = saved["autohide"] as? Bool {
-            run("/usr/bin/defaults", "write", domain, "autohide", "-bool", autohide ? "true" : "false")
-        } else {
-            run("/usr/bin/defaults", "delete", domain, "autohide")
-        }
-        if let delay = saved["autohide-delay"] as? Double {
-            run("/usr/bin/defaults", "write", domain, "autohide-delay", "-float", "\(delay)")
-        } else {
-            run("/usr/bin/defaults", "delete", domain, "autohide-delay")
-        }
+        // A value missing from the saved state was unset before, so it is removed again.
+        apply(["autohide": saved["autohide"], "autohide-delay": saved["autohide-delay"]])
         defaults.removeObject(forKey: savedStateKey)
-        run("/usr/bin/killall", "Dock")
+        log.notice("Restored the system Dock")
     }
 
-    private static func run(_ path: String, _ arguments: String...) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
+    /// Writes the values (nil removes one) and restarts the Dock, which reads them only at launch.
+    private static func apply(_ values: [String: Any?]) {
+        for (key, value) in values {
+            CFPreferencesSetAppValue(key as CFString, value as CFPropertyList?, domain)
+        }
+        guard CFPreferencesAppSynchronize(domain) else {
+            log.error("Could not save the system Dock's preferences")
+            return
+        }
+        let killall = Process()
+        killall.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        killall.arguments = ["Dock"]
+        killall.standardError = FileHandle.nullDevice
+        do {
+            try killall.run()
+            killall.waitUntilExit()
+            if killall.terminationStatus != 0 { log.error("killall Dock exited with \(killall.terminationStatus)") }
+        } catch {
+            log.error("Could not restart the Dock: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

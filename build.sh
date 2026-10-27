@@ -52,6 +52,10 @@ mkdir -p "$DEST"
 # Let the running copy quit cleanly (it restores the system Dock) before replacing it.
 pkill -x AlwaysDock || true
 for _ in {1..50}; do pgrep -x AlwaysDock >/dev/null || break; sleep 0.1; done
+if pgrep -x AlwaysDock >/dev/null; then
+    echo "AlwaysDock did not quit. Quit it from its menu bar icon and run this again." >&2
+    exit 1
+fi
 rm -rf "$DEST/AlwaysDock.app"
 cp -R "$APP" "$DEST/"
 open "$DEST/AlwaysDock.app"

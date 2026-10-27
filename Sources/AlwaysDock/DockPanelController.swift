@@ -8,50 +8,57 @@ final class DockPanelController {
     private let backdrop = BackdropView()
     private let label = LabelPanel()
     private var screen: NSScreen?
+    /// The edge the dock was last laid out along. The setting can change before the next layout.
+    private var edge = DockEdge.bottom
+    /// Where the dock sits while it is in view.
+    private var home = NSRect.zero
     /// Whether the dock belongs on its screen. While it auto-hides it can still be out of sight.
     private var isShown = false
     /// Full-screen content on the screen: stay out of sight until the pointer pushes against the dock's
     /// screen edge, like the system Dock in full screen.
     private(set) var autoHides = false
+    /// Whether the dock is in view, or on its way in.
+    private var isIn = false
 
     init(model: DockModel) {
         self.model = model
         panel.contentView = backdrop
     }
 
-    /// Returns whether the dock was (re)placed, i.e. its reserved area may have changed.
-    @discardableResult
-    func show(on screen: NSScreen, autoHide: Bool) -> Bool {
-        let needsLayout = !isShown || autoHides != autoHide || self.screen?.frame != screen.frame
+    /// The dock window while it is ordered in, in view or not.
+    var window: NSWindow? { panel.isVisible ? panel : nil }
+
+    /// `instant` is for changes made while macOS slides Spaces: the dock slides along with them, so the
+    /// slide is its animation, as with the system Dock.
+    func show(on screen: NSScreen, autoHide: Bool, instant: Bool = false) {
+        let moved = !isShown || edge != Settings.shared.edge || self.screen?.frame != screen.frame
             || self.screen?.visibleFrame != screen.visibleFrame
         self.screen = screen
-        guard needsLayout else { return false }
         isShown = true
+        if moved { layout() }
+        guard moved || autoHides != autoHide else { return }
         autoHides = autoHide
-        layout()
-        if autoHide { conceal() } else { panel.orderFrontRegardless() }
-        return true
+        // A dock in view that moved would visibly jump before fading, so it changes at once. Out of view,
+        // it fades in at its new place.
+        slide(in: !autoHide, animated: !instant && (!moved || !isIn))
     }
 
-    /// Returns whether the dock was showing before.
-    @discardableResult
-    func hide() -> Bool {
-        let wasShown = isShown
+    func hide() {
+        guard isShown else { return }
         isShown = false
         autoHides = false
-        conceal()
-        return wasShown
+        slide(in: false, animated: false)
+        panel.orderOut(nil)
     }
 
     /// While the dock auto-hides: bring it in when the pointer pushes against the dock's screen edge, and
     /// take it away once the pointer leaves it.
     func trackPointer(_ location: NSPoint) {
         guard autoHides, let trigger = edgeStrip else { return }
-        let keep = trigger.union(panel.frame).insetBy(dx: -Metrics.margin * 2, dy: -Metrics.margin * 2)
-        if !panel.isVisible {
-            if trigger.contains(location) { panel.orderFrontRegardless() }
-        } else if !keep.contains(location) {
-            conceal()
+        if !isIn {
+            if trigger.contains(location) { slide(in: true, animated: true) }
+        } else if !trigger.union(home).insetBy(dx: -Metrics.margin * 2, dy: -Metrics.margin * 2).contains(location) {
+            slide(in: false, animated: true)
         }
     }
 
@@ -59,39 +66,67 @@ final class DockPanelController {
     private var edgeStrip: NSRect? {
         guard let screen else { return nil }
         let frame = screen.frame
-        let dock = panel.frame
         let depth: CGFloat = 2
-        switch Settings.shared.edge {
-        case .bottom: return NSRect(x: dock.minX, y: frame.minY, width: dock.width, height: depth)
-        case .left: return NSRect(x: frame.minX, y: dock.minY, width: depth, height: dock.height)
-        case .right: return NSRect(x: frame.maxX - depth, y: dock.minY, width: depth, height: dock.height)
+        switch edge {
+        case .bottom: return NSRect(x: home.minX, y: frame.minY, width: home.width, height: depth)
+        case .left: return NSRect(x: frame.minX, y: home.minY, width: depth, height: home.height)
+        case .right: return NSRect(x: frame.maxX - depth, y: home.minY, width: depth, height: home.height)
         }
     }
 
-    private func conceal() {
-        panel.orderOut(nil)
-        label.orderOut(nil)
+    /// Where the dock waits out of view: a little toward its screen edge, so that it fades in moving
+    /// outward. A full slide past the edge would show up on a display that shares that edge.
+    private var away: NSRect {
+        let distance: CGFloat = 12
+        switch edge {
+        case .bottom: return home.offsetBy(dx: 0, dy: -distance)
+        case .left: return home.offsetBy(dx: -distance, dy: 0)
+        case .right: return home.offsetBy(dx: distance, dy: 0)
+        }
+    }
+
+    /// Brings the dock into view or takes it away. Out of view it stays ordered in, transparent and
+    /// click-through, so that macOS keeps carrying it along when it slides Spaces: the dock leaves with
+    /// the desktop and comes back with it, as the system Dock does.
+    private func slide(in visible: Bool, animated: Bool) {
+        isIn = visible
+        if !visible { label.orderOut(nil) }
+        panel.ignoresMouseEvents = !visible
+        if !panel.isVisible {
+            panel.alphaValue = 0
+            panel.setFrame(away, display: false)
+            panel.orderFrontRegardless()
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            // Zero still goes through the animator, which stops a fade under way from undoing this change.
+            context.duration = animated ? 0.2 : 0
+            context.timingFunction = CAMediaTimingFunction(name: visible ? .easeOut : .easeIn)
+            panel.animator().alphaValue = visible ? 1 : 0
+            panel.animator().setFrame(visible ? home : away, display: true)
+        }
     }
 
     /// The full-length strip along the dock's screen edge that windows should keep clear of, like the
     /// space the system Dock removes from `visibleFrame`. Nil while the dock is hidden or auto-hides.
-    var reservedArea: NSRect? {
+    var reservedArea: ReservedArea? {
         guard isShown, !autoHides, let screen else { return nil }
         let frame = screen.frame
-        let edge = Settings.shared.edge
-        let thickness = (edge.isVertical ? panel.frame.width : panel.frame.height) + Metrics.margin * 2
+        let thickness = (edge.isVertical ? home.width : home.height) + Metrics.margin * 2
+        let rect: NSRect
         switch edge {
-        case .bottom: return NSRect(x: frame.minX, y: frame.minY, width: frame.width, height: thickness)
-        case .left: return NSRect(x: frame.minX, y: frame.minY, width: thickness, height: frame.height)
-        case .right: return NSRect(x: frame.maxX - thickness, y: frame.minY, width: thickness, height: frame.height)
+        case .bottom: rect = NSRect(x: frame.minX, y: frame.minY, width: frame.width, height: thickness)
+        case .left: rect = NSRect(x: frame.minX, y: frame.minY, width: thickness, height: frame.height)
+        case .right: rect = NSRect(x: frame.maxX - thickness, y: frame.minY, width: thickness, height: frame.height)
         }
+        return ReservedArea(rect: rect, edge: edge)
     }
 
     /// Rebuilds the icons and fits the dock to its screen edge, shrinking icons when they would not fit.
     func layout() {
-        guard let screen else { return }
+        // A hidden dock is laid out when it is shown again.
+        guard isShown, let screen else { return }
         label.orderOut(nil)
-        let edge = Settings.shared.edge
+        edge = Settings.shared.edge
         let items = model.items
         let separatorCount = zip(items, items.dropFirst()).filter { $0.isPinned && !$1.isPinned }.count
 
@@ -145,7 +180,11 @@ final class DockPanelController {
                              y: screen.visibleFrame.midY - size.height / 2)
         }
         backdrop.cornerRadius = cross * 0.36
-        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+        home = NSRect(origin: origin, size: size)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            panel.animator().setFrame(isIn ? home : away, display: true)
+        }
         panel.invalidateShadow()
     }
 
@@ -155,6 +194,6 @@ final class DockPanelController {
             return
         }
         let itemRect = window.convertToScreen(view.convert(view.bounds, to: nil))
-        label.show(view.item.name, item: itemRect, dock: panel.frame, edge: Settings.shared.edge)
+        label.show(view.item.name, item: itemRect, dock: home, edge: edge)
     }
 }

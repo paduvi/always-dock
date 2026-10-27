@@ -8,8 +8,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panels: [CGDirectDisplayID: DockPanelController] = [:]
     private var statusItem: NSStatusItem?
     private var screenTimer: Timer?
+    private var settleTimer: Timer?
+    private var settleDeadline = Date.distantPast
     private var pointerTimer: Timer?
     private var presentationObservation: NSKeyValueObservation?
+    /// Whether the active app hides the Dock, as games and slideshows do. Kept from KVO, since reading
+    /// the presentation options is a round trip to the window server.
+    private var appHidesDock = false
+    /// When each display began to look full screen, while its dock was still in view.
+    private var fullSince: [CGDirectDisplayID: Date] = [:]
+    /// The reserved areas that windows were last fitted around.
+    private var fittedAreas: [ReservedArea] = []
     private var terminationSignal: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -33,13 +42,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         screenTimer = Timer.scheduledTimer(timeInterval: 1, target: self, selector: #selector(syncPanels),
                                            userInfo: nil, repeats: true)
         // Entering or leaving a full-screen app switches Spaces; catch it without waiting for the timer.
-        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(syncPanels),
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(syncPanelsUntilSettled),
                                                           name: NSWorkspace.activeSpaceDidChangeNotification,
                                                           object: nil)
-        presentationObservation = NSApp.observe(\.currentSystemPresentationOptions) { [weak self] _, _ in
-            MainActor.assumeIsolated { self?.syncPanels() }
+        // That notification comes only once the switch is over. A dock is hidden or uncovered as the
+        // slide starts, and as it leaves the screen, which tells of the switch while it happens.
+        center.addObserver(self, selector: #selector(windowOcclusionChanged(_:)),
+                           name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        // `.initial` also runs the first sync, which creates the docks.
+        presentationObservation = NSApp.observe(\.currentSystemPresentationOptions,
+                                                options: [.initial]) { [weak self] app, _ in
+            MainActor.assumeIsolated {
+                self?.appHidesDock = app.currentSystemPresentationOptions.contains(.hideDock)
+                self?.syncPanelsUntilSettled()
+            }
         }
-        syncPanels()
 
         windowGuard.reservedAreas = { [weak self] in self?.panels.values.compactMap(\.reservedArea) ?? [] }
         if Settings.shared.reserveSpace { windowGuard.start() }
@@ -55,26 +72,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// disappear while the active app hides the Dock.
     @objc private func syncPanels() {
         let avoidFullScreen = Settings.shared.autoHideInFullScreen
-        let appHidesDock = avoidFullScreen && FullScreen.appHidesDock
-        let fullScreen = avoidFullScreen ? FullScreen.displays() : []
+        let hideAll = avoidFullScreen && appHidesDock
+        let states = avoidFullScreen ? FullScreen.states(docks: panels.compactMapValues(\.window)) : [:]
+        let now = Date()
         var current = Set<CGDirectDisplayID>()
-        var moved = false
         for screen in NSScreen.screens {
             guard let id = screen.displayID else { continue }
             current.insert(id)
             let controller = panels[id] ?? DockPanelController(model: model)
             panels[id] = controller
-            if SystemDock.occupies(screen) || appHidesDock {
-                moved = controller.hide() || moved
-            } else {
-                moved = controller.show(on: screen, autoHide: fullScreen.contains(id)) || moved
+            if SystemDock.occupies(screen) || hideAll {
+                controller.hide()
+                fullSince[id] = nil
+                continue
             }
+            let state = states[id] ?? FullScreen.State()
+            var autoHide = state.isFull
+            // A dock in view waits a moment before it hides for a window that fills the display: the window
+            // macOS animates when leaving full screen lingers for a few frames after the slide brought the
+            // desktop and its dock back. Mid-switch, the dock changes along with the slide.
+            if state.isFull, !state.isSwitching, controller.window != nil, !controller.autoHides {
+                let since = fullSince[id] ?? now
+                fullSince[id] = since
+                if now.timeIntervalSince(since) < 0.3 {
+                    autoHide = false
+                    settle(for: 0.35)
+                }
+            } else {
+                fullSince[id] = nil
+            }
+            controller.show(on: screen, autoHide: autoHide, instant: state.isSwitching)
         }
         for (id, controller) in panels where !current.contains(id) {
             controller.hide()
             panels[id] = nil
+            fullSince[id] = nil
         }
-        if moved { windowGuard.refitSoon() }
+        refitIfNeeded()
 
         // Auto-hiding docks wait for the pointer at their screen edge; watch it only while there are any.
         let autoHiding = panels.values.contains { $0.autoHides }
@@ -88,6 +122,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Space switches and full-screen changes play out over a fraction of a second after the signals
+    /// that announce them, so keep checking often for a moment instead of waiting for the one-second check.
+    @objc private func syncPanelsUntilSettled() {
+        syncPanels()
+        settle(for: 1)
+    }
+
+    @objc private func windowOcclusionChanged(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              panels.values.contains(where: { $0.window === window }) else { return }
+        syncPanelsUntilSettled()
+    }
+
+    /// Checks every 50 ms for at least the given time.
+    private func settle(for duration: TimeInterval) {
+        settleDeadline = max(settleDeadline, Date(timeIntervalSinceNow: duration))
+        guard settleTimer == nil else { return }
+        settleTimer = Timer.scheduledTimer(timeInterval: 0.05, target: self, selector: #selector(settleTick),
+                                           userInfo: nil, repeats: true)
+        settleTimer?.tolerance = 0.01
+    }
+
+    @objc private func settleTick() {
+        syncPanels()
+        guard Date() >= settleDeadline else { return }
+        settleTimer?.invalidate()
+        settleTimer = nil
+    }
+
     @objc private func trackPointer() {
         let location = NSEvent.mouseLocation
         panels.values.forEach { $0.trackPointer(location) }
@@ -95,13 +158,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func layoutPanels() {
         panels.values.forEach { $0.layout() }
+        refitIfNeeded()
+    }
+
+    /// Windows are only ever shrunk, so they need another look only when a dock claims space they were
+    /// not fitted around. A dock that auto-hides and comes back claims nothing new, which keeps full-screen
+    /// transitions free of a burst of Accessibility queries to every app.
+    private func refitIfNeeded() {
+        let areas = panels.values.compactMap(\.reservedArea)
+        guard areas.contains(where: { !fittedAreas.contains($0) }) else { return }
+        fittedAreas = areas
+        windowGuard.refitSoon()
     }
 
     @objc private func settingsChanged() {
+        if Settings.shared.reserveSpace { windowGuard.start() } else { windowGuard.stop() }
         syncPanels()
         layoutPanels()
-        if Settings.shared.reserveSpace { windowGuard.start() } else { windowGuard.stop() }
-        windowGuard.refitSoon()
     }
 
     // MARK: Menu bar item

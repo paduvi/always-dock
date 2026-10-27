@@ -1,6 +1,12 @@
 import AppKit
 import ApplicationServices
 
+/// A strip along a screen edge, in Cocoa screen coordinates, that windows must keep clear of.
+struct ReservedArea: Equatable {
+    let rect: NSRect
+    let edge: DockEdge
+}
+
 /// Keeps zoomed, filled and tiled windows out of the strip AlwaysDock sits in, as the system Dock does
 /// through `visibleFrame`. Third-party apps cannot change `visibleFrame`, so this watches other apps'
 /// windows through the Accessibility API (it needs the Accessibility permission) and shrinks any window
@@ -8,8 +14,7 @@ import ApplicationServices
 /// dragged behind the dock.
 @MainActor
 final class WindowGuard: NSObject {
-    /// Strips along screen edges, in Cocoa screen coordinates, that windows must keep clear of.
-    var reservedAreas: () -> [NSRect] = { [] }
+    var reservedAreas: () -> [ReservedArea] = { [] }
 
     private(set) var isRunning = false
     private var observers: [pid_t: AXObserver] = [:]
@@ -29,8 +34,12 @@ final class WindowGuard: NSObject {
     func start() {
         guard !isRunning else { return }
         isRunning = true
+        // Every query waits for the app to answer. Without a limit, one hung app would hold up the dock
+        // for the default 6 seconds per query.
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1)
         if Self.isTrusted {
             attachAll()
+            refitSoon()
         } else {
             // Shows the system prompt that leads to Privacy & Security → Accessibility.
             AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
@@ -159,21 +168,26 @@ final class WindowGuard: NSObject {
     }
 
     private func fit(_ window: AXUIElement) {
-        guard isAdjustable(window), let frame = frame(of: window) else { return }
+        // Every query is a round trip to the window's app, so ask for the rest only when the window
+        // reaches into a strip, which most windows never do.
+        guard let frame = frame(of: window) else { return }
+        let areas = reservedAreas().filter { frame.intersects($0.rect) }
+        guard !areas.isEmpty, isAdjustable(window) else { return }
         var target = frame
-        for area in reservedAreas() where target.intersects(area) {
-            switch Settings.shared.edge {
+        for area in areas where target.intersects(area.rect) {
+            let strip = area.rect
+            switch area.edge {
             case .bottom:
-                target = NSRect(x: target.minX, y: area.maxY, width: target.width, height: target.maxY - area.maxY)
+                target = NSRect(x: target.minX, y: strip.maxY, width: target.width, height: target.maxY - strip.maxY)
             case .left:
-                target = NSRect(x: area.maxX, y: target.minY, width: target.maxX - area.maxX, height: target.height)
+                target = NSRect(x: strip.maxX, y: target.minY, width: target.maxX - strip.maxX, height: target.height)
             case .right:
-                target.size.width = area.minX - target.minX
+                target.size.width = strip.minX - target.minX
             }
         }
         // A window left mostly inside the strip was put there on purpose.
         guard target != frame, target.width >= 200, target.height >= 120 else { return }
-        setFrame(target, of: window, moving: target.origin != frame.origin)
+        setFrame(target, of: window, from: frame)
         recentlyAdjusted.append((window, Date()))
     }
 
@@ -206,14 +220,16 @@ final class WindowGuard: NSObject {
                       width: size.width, height: size.height)
     }
 
-    private func setFrame(_ frame: NSRect, of window: AXUIElement, moving: Bool) {
+    private func setFrame(_ target: NSRect, of window: AXUIElement, from frame: NSRect) {
         // Shrink first, then move, so the window never pokes past the screen edge in between.
-        var size = frame.size
+        var size = target.size
         if let value = AXValueCreate(.cgSize, &size) {
             AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
         }
-        guard moving else { return }
-        var position = CGPoint(x: frame.minX, y: primaryScreenHeight - frame.maxY)
+        // Accessibility places windows by their top-left corner, which stays put when a window gives up
+        // space at the bottom. Moving it anyway would make the app lay the window out a second time.
+        guard target.minX != frame.minX || target.maxY != frame.maxY else { return }
+        var position = CGPoint(x: target.minX, y: primaryScreenHeight - target.maxY)
         if let value = AXValueCreate(.cgPoint, &position) {
             AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
         }
