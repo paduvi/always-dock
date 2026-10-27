@@ -8,6 +8,11 @@ final class DockPanelController {
     private let backdrop = BackdropView()
     private let label = LabelPanel()
     private var screen: NSScreen?
+    /// Whether the dock belongs on its screen. While it auto-hides it can still be out of sight.
+    private var isShown = false
+    /// Full-screen content on the screen: stay out of sight until the pointer pushes against the dock's
+    /// screen edge, like the system Dock in full screen.
+    private(set) var autoHides = false
 
     init(model: DockModel) {
         self.model = model
@@ -16,29 +21,62 @@ final class DockPanelController {
 
     /// Returns whether the dock was (re)placed, i.e. its reserved area may have changed.
     @discardableResult
-    func show(on screen: NSScreen) -> Bool {
-        let needsLayout = !panel.isVisible || self.screen?.frame != screen.frame
+    func show(on screen: NSScreen, autoHide: Bool) -> Bool {
+        let needsLayout = !isShown || autoHides != autoHide || self.screen?.frame != screen.frame
             || self.screen?.visibleFrame != screen.visibleFrame
         self.screen = screen
         guard needsLayout else { return false }
+        isShown = true
+        autoHides = autoHide
         layout()
-        panel.orderFrontRegardless()
+        if autoHide { conceal() } else { panel.orderFrontRegardless() }
         return true
     }
 
     /// Returns whether the dock was showing before.
     @discardableResult
     func hide() -> Bool {
-        let wasVisible = panel.isVisible
+        let wasShown = isShown
+        isShown = false
+        autoHides = false
+        conceal()
+        return wasShown
+    }
+
+    /// While the dock auto-hides: bring it in when the pointer pushes against the dock's screen edge, and
+    /// take it away once the pointer leaves it.
+    func trackPointer(_ location: NSPoint) {
+        guard autoHides, let trigger = edgeStrip else { return }
+        let keep = trigger.union(panel.frame).insetBy(dx: -Metrics.margin * 2, dy: -Metrics.margin * 2)
+        if !panel.isVisible {
+            if trigger.contains(location) { panel.orderFrontRegardless() }
+        } else if !keep.contains(location) {
+            conceal()
+        }
+    }
+
+    /// The screen's outermost points along the dock, where a pointer pushing against the edge ends up.
+    private var edgeStrip: NSRect? {
+        guard let screen else { return nil }
+        let frame = screen.frame
+        let dock = panel.frame
+        let depth: CGFloat = 2
+        switch Settings.shared.edge {
+        case .bottom: return NSRect(x: dock.minX, y: frame.minY, width: dock.width, height: depth)
+        case .left: return NSRect(x: frame.minX, y: dock.minY, width: depth, height: dock.height)
+        case .right: return NSRect(x: frame.maxX - depth, y: dock.minY, width: depth, height: dock.height)
+        }
+    }
+
+    private func conceal() {
         panel.orderOut(nil)
         label.orderOut(nil)
-        return wasVisible
     }
 
     /// The full-length strip along the dock's screen edge that windows should keep clear of, like the
-    /// space the system Dock removes from `visibleFrame`. Nil while the dock is hidden.
+    /// space the system Dock removes from `visibleFrame`. Nil while the dock is hidden or auto-hides.
     var reservedArea: NSRect? {
-        guard panel.isVisible, let screen else { return nil }
+        guard isShown, !autoHides, let screen else { return nil }
         let frame = screen.frame
         let edge = Settings.shared.edge
         let thickness = (edge.isVertical ? panel.frame.width : panel.frame.height) + Metrics.margin * 2

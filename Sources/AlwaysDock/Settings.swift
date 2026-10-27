@@ -40,6 +40,12 @@ final class Settings {
         set { store(newValue, forKey: "hideSystemDock") }
     }
 
+    /// Behave like the system Dock around full-screen content (see FullScreen). On by default.
+    var autoHideInFullScreen: Bool {
+        get { defaults.object(forKey: "autoHideInFullScreen") as? Bool ?? true }
+        set { store(newValue, forKey: "autoHideInFullScreen") }
+    }
+
     /// Keep zoomed and tiled windows clear of the dock (see WindowGuard).
     var reserveSpace: Bool {
         get { defaults.bool(forKey: "reserveSpace") }

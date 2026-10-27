@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panels: [CGDirectDisplayID: DockPanelController] = [:]
     private var statusItem: NSStatusItem?
     private var screenTimer: Timer?
+    private var pointerTimer: Timer?
+    private var presentationObservation: NSKeyValueObservation?
     private var terminationSignal: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -30,6 +32,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The system Dock hopping to another screen changes visible frames without a reliable notification.
         screenTimer = Timer.scheduledTimer(timeInterval: 1, target: self, selector: #selector(syncPanels),
                                            userInfo: nil, repeats: true)
+        // Entering or leaving a full-screen app switches Spaces; catch it without waiting for the timer.
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(syncPanels),
+                                                          name: NSWorkspace.activeSpaceDidChangeNotification,
+                                                          object: nil)
+        presentationObservation = NSApp.observe(\.currentSystemPresentationOptions) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.syncPanels() }
+        }
         syncPanels()
 
         windowGuard.reservedAreas = { [weak self] in self?.panels.values.compactMap(\.reservedArea) ?? [] }
@@ -41,8 +50,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if Settings.shared.hideSystemDock { SystemDock.restore() }
     }
 
-    /// One dock per screen, except the screen the system Dock is currently shown on.
+    /// One dock per screen, except the screen the system Dock is currently shown on. Around full-screen
+    /// content the docks behave like the system Dock: they auto-hide on screens that a window fills, and
+    /// disappear while the active app hides the Dock.
     @objc private func syncPanels() {
+        let avoidFullScreen = Settings.shared.autoHideInFullScreen
+        let appHidesDock = avoidFullScreen && FullScreen.appHidesDock
+        let fullScreen = avoidFullScreen ? FullScreen.displays() : []
         var current = Set<CGDirectDisplayID>()
         var moved = false
         for screen in NSScreen.screens {
@@ -50,10 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             current.insert(id)
             let controller = panels[id] ?? DockPanelController(model: model)
             panels[id] = controller
-            if SystemDock.occupies(screen) {
+            if SystemDock.occupies(screen) || appHidesDock {
                 moved = controller.hide() || moved
             } else {
-                moved = controller.show(on: screen) || moved
+                moved = controller.show(on: screen, autoHide: fullScreen.contains(id)) || moved
             }
         }
         for (id, controller) in panels where !current.contains(id) {
@@ -61,6 +75,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             panels[id] = nil
         }
         if moved { windowGuard.refitSoon() }
+
+        // Auto-hiding docks wait for the pointer at their screen edge; watch it only while there are any.
+        let autoHiding = panels.values.contains { $0.autoHides }
+        if autoHiding, pointerTimer == nil {
+            pointerTimer = Timer.scheduledTimer(timeInterval: 0.1, target: self, selector: #selector(trackPointer),
+                                                userInfo: nil, repeats: true)
+            pointerTimer?.tolerance = 0.05
+        } else if !autoHiding {
+            pointerTimer?.invalidate()
+            pointerTimer = nil
+        }
+    }
+
+    @objc private func trackPointer() {
+        let location = NSEvent.mouseLocation
+        panels.values.forEach { $0.trackPointer(location) }
     }
 
     @objc private func layoutPanels() {
@@ -68,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func settingsChanged() {
+        syncPanels()
         layoutPanels()
         if Settings.shared.reserveSpace { windowGuard.start() } else { windowGuard.stop() }
         windowGuard.refitSoon()
@@ -105,6 +136,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hideSystemDock.state = settings.hideSystemDock ? .on : .off
         hideSystemDock.toolTip = "Use AlwaysDock on every display, including the main display and full-screen apps."
         menu.addItem(hideSystemDock)
+
+        let autoHide = ClosureMenuItem("Auto-Hide in Full Screen") { settings.autoHideInFullScreen.toggle() }
+        autoHide.state = settings.autoHideInFullScreen ? .on : .off
+        autoHide.toolTip = "Like the macOS Dock: hide while a window fills the display and slide in when the pointer "
+            + "pushes against the dock's edge. Stay hidden while an app such as a game hides the Dock."
+        menu.addItem(autoHide)
 
         let waitingForPermission = settings.reserveSpace && !WindowGuard.isTrusted
         let reserveSpace = ClosureMenuItem(waitingForPermission
