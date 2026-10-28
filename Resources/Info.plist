@@ -24,5 +24,7 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>AlwaysDock shrinks this app's windows when they zoom under the dock (Reserve Space for Dock without Accessibility access).</string>
 </dict>
 </plist>

@@ -5,6 +5,7 @@ import ServiceManagement
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let model = DockModel()
     private let windowGuard = WindowGuard()
+    private let scriptedGuard = ScriptedWindowGuard()
     private var panels: [CGDirectDisplayID: DockPanelController] = [:]
     private var statusItem: NSStatusItem?
     private var screenTimer: Timer?
@@ -58,8 +59,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        windowGuard.reservedAreas = { [weak self] in self?.panels.values.compactMap(\.reservedArea) ?? [] }
-        if Settings.shared.reserveSpace { windowGuard.start() }
+        let reservedAreas: () -> [ReservedArea] = { [weak self] in
+            self?.panels.values.compactMap(\.reservedArea) ?? []
+        }
+        windowGuard.reservedAreas = reservedAreas
+        scriptedGuard.reservedAreas = reservedAreas
+        windowGuard.onAccessGranted = { [weak self] in self?.updateReserveSpace() }
+        updateReserveSpace()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -169,10 +175,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard areas.contains(where: { !fittedAreas.contains($0) }) else { return }
         fittedAreas = areas
         windowGuard.refitSoon()
+        scriptedGuard.refitSoon()
+    }
+
+    /// Windows are fitted through Accessibility when AlwaysDock has access. Granting it takes an administrator,
+    /// so until then the apps that support AppleScript are asked to resize their windows instead.
+    private func updateReserveSpace() {
+        let reserveSpace = Settings.shared.reserveSpace
+        if reserveSpace { windowGuard.start() } else { windowGuard.stop() }
+        if reserveSpace, !windowGuard.isGuarding { scriptedGuard.start() } else { scriptedGuard.stop() }
     }
 
     @objc private func settingsChanged() {
-        if Settings.shared.reserveSpace { windowGuard.start() } else { windowGuard.stop() }
+        updateReserveSpace()
         syncPanels()
         layoutPanels()
     }
@@ -216,17 +231,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             + "pushes against the dock's edge. Stay hidden while an app such as a game hides the Dock."
         menu.addItem(autoHide)
 
-        let waitingForPermission = settings.reserveSpace && !WindowGuard.isTrusted
-        let reserveSpace = ClosureMenuItem(waitingForPermission
-                                           ? "Reserve Space for Dock (waiting for Accessibility access)"
-                                           : "Reserve Space for Dock") {
-            settings.reserveSpace.toggle()
-        }
-        reserveSpace.state = waitingForPermission ? .mixed : (settings.reserveSpace ? .on : .off)
-        reserveSpace.toolTip = "Keep zoomed and tiled windows clear of the dock. Requires Accessibility access."
+        let scriptedOnly = settings.reserveSpace && !windowGuard.isGuarding
+        let reserveSpace = ClosureMenuItem("Reserve Space for Dock") { settings.reserveSpace.toggle() }
+        reserveSpace.state = scriptedOnly ? .mixed : (settings.reserveSpace ? .on : .off)
+        reserveSpace.toolTip = "Keep zoomed and tiled windows clear of the dock. Without Accessibility access, only "
+            + "apps that support AppleScript are resized, and each asks you once for permission."
         menu.addItem(reserveSpace)
-        if waitingForPermission {
-            menu.addItem(ClosureMenuItem("Open Accessibility Settings…") { WindowGuard.openSettings() })
+        if scriptedOnly {
+            let note = NSMenuItem(title: "No Accessibility access: AppleScript apps only", action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            note.indentationLevel = 1
+            menu.addItem(note)
+            let openSettings = ClosureMenuItem("Open Accessibility Settings…") { WindowGuard.openSettings() }
+            openSettings.indentationLevel = 1
+            menu.addItem(openSettings)
         }
 
         let sizeMenu = NSMenu()

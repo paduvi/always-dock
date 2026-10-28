@@ -11,12 +11,17 @@ struct ReservedArea: Equatable {
 /// through `visibleFrame`. Third-party apps cannot change `visibleFrame`, so this watches other apps'
 /// windows through the Accessibility API (it needs the Accessibility permission) and shrinks any window
 /// that is resized or opened into the strip. Plain moves are left alone, so a window can still be
-/// dragged behind the dock.
+/// dragged behind the dock. Until access is granted, ScriptedWindowGuard does the same for apps that
+/// support AppleScript.
 @MainActor
 final class WindowGuard: NSObject {
     var reservedAreas: () -> [ReservedArea] = { [] }
+    /// Called once Accessibility access arrives after `start()` had to wait for it.
+    var onAccessGranted: () -> Void = {}
 
     private(set) var isRunning = false
+    /// Running with Accessibility access, so windows are actually being fitted.
+    private(set) var isGuarding = false
     private var observers: [pid_t: AXObserver] = [:]
     private var trustTimer: Timer?
     private var pending: [AXUIElement] = []
@@ -51,6 +56,7 @@ final class WindowGuard: NSObject {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        isGuarding = false
         trustTimer?.invalidate()
         flushTimer?.invalidate()
         pending.removeAll()
@@ -83,11 +89,13 @@ final class WindowGuard: NSObject {
         trustTimer?.invalidate()
         attachAll()
         refitSoon()
+        onAccessGranted()
     }
 
     // MARK: Observing apps
 
     private func attachAll() {
+        isGuarding = true
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(self, selector: #selector(appLaunched(_:)),
                            name: NSWorkspace.didLaunchApplicationNotification, object: nil)
@@ -170,9 +178,15 @@ final class WindowGuard: NSObject {
     private func fit(_ window: AXUIElement) {
         // Every query is a round trip to the window's app, so ask for the rest only when the window
         // reaches into a strip, which most windows never do.
-        guard let frame = frame(of: window) else { return }
-        let areas = reservedAreas().filter { frame.intersects($0.rect) }
-        guard !areas.isEmpty, isAdjustable(window) else { return }
+        guard let frame = frame(of: window), let target = Self.fitted(frame, clearOf: reservedAreas()),
+              isAdjustable(window) else { return }
+        setFrame(target, of: window, from: frame)
+        recentlyAdjusted.append((window, Date()))
+    }
+
+    /// The frame a window shrinks to so it keeps clear of the strips, or nil when it needs no change or
+    /// would be left too small. Shared with ScriptedWindowGuard, which resizes through Apple Events.
+    static func fitted(_ frame: NSRect, clearOf areas: [ReservedArea]) -> NSRect? {
         var target = frame
         for area in areas where target.intersects(area.rect) {
             let strip = area.rect
@@ -186,9 +200,8 @@ final class WindowGuard: NSObject {
             }
         }
         // A window left mostly inside the strip was put there on purpose.
-        guard target != frame, target.width >= 200, target.height >= 120 else { return }
-        setFrame(target, of: window, from: frame)
-        recentlyAdjusted.append((window, Date()))
+        guard target != frame, target.width >= 200, target.height >= 120 else { return nil }
+        return target
     }
 
     /// Standard, resizable, on-screen windows only: no sheets, panels, minimized or full-screen windows.

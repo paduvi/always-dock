@@ -30,7 +30,7 @@ The macOS Dock shows on **one** display at a time and hides in full-screen apps,
 - Drop files on an icon to open them with that app.
 - Liquid Glass background on macOS 26 and later, vibrancy on older versions. Follows light and dark mode.
 - Can sit on the bottom, left or right edge. Icons shrink to fit when space runs out.
-- Optional space reservation: zoomed (Zoom/Fill) and tiled windows are not covered by the dock.
+- Optional space reservation: zoomed (Zoom/Fill) and tiled windows are not covered by the dock. Without admin rights it still works for apps that support AppleScript.
 
 ## Requirements
 
@@ -69,6 +69,12 @@ The app goes into `/Applications`. If you have no admin rights, meaning `/Applic
 
 The running copy quits cleanly and is replaced by the new one. If an old copy is still in `/Applications` or `~/Applications`, the script tells you so you can delete it and avoid launching the old version.
 
+The first build creates a self-signed code signing identity, "AlwaysDock Local Signing", in a keychain of its own (`~/Library/Keychains/AlwaysDock-Signing.keychain-db`), and every build is signed with it. macOS ties Accessibility access to that signature, so it survives rebuilds; with an ad-hoc signature every build would be a new app to macOS and need access granted again. No admin rights are needed. The keychain has an empty password so that builds never ask for one, which also means anything running as your user could sign code with it and get AlwaysDock's permissions. To sign with another identity, or ad hoc with `SIGN_IDENTITY=-`:
+
+```bash
+SIGN_IDENTITY="Apple Development: Your Name (XXXXXXXXXX)" ./build.sh --install
+```
+
 During development you can run it without packaging a `.app`. Open at Login does not work this way:
 
 ```bash
@@ -83,7 +89,7 @@ AlwaysDock has no icon in the Dock. All settings are under the dock icon in the 
 | --- | --- |
 | **Hide System Dock** | Hides the macOS Dock completely so AlwaysDock takes over on every display. Quitting AlwaysDock brings the system Dock back. |
 | **Auto-Hide in Full Screen** | On by default. The dock gets out of the way of full-screen content, like the macOS Dock (see below). |
-| **Reserve Space for Dock** | Zoomed and tiled windows shrink so the dock does not cover them. Requires Accessibility access (see below). |
+| **Reserve Space for Dock** | Zoomed and tiled windows shrink so the dock does not cover them. Works best with Accessibility access (see below); without it, only apps that support AppleScript are resized. |
 | **Icon Size** | Small (40), Medium (48), Large (64). |
 | **Position** | Bottom, Left, Right. Defaults to wherever the system Dock is. |
 | **Open at Login** | Starts AlwaysDock when you log in. Only available when running from `AlwaysDock.app`. |
@@ -114,7 +120,7 @@ The real Dock reserves space by shrinking the screen's usable area (`visibleFram
 - Full-screen windows, minimized windows, sheets and panels are never adjusted. The display that has the system Dock is not touched either, since macOS already handles it.
 - When you turn the option on, or change the dock's size or position, windows that are already open are checked again. A dock that hides for full-screen content and comes back does not trigger this, so entering and leaving full screen stays smooth.
 
-**Granting access:** turn on Reserve Space for Dock. macOS asks for permission; open System Settings → Privacy & Security → Accessibility and turn on AlwaysDock. On macOS 27 that list is called **Device Control and Data Access** instead of Accessibility. While it waits, the menu item reads "(waiting for Accessibility access)" and an **Open Accessibility Settings…** item below it jumps straight to the right list. Once access is granted the feature starts on its own, without relaunching the app.
+**Granting access:** turn on Reserve Space for Dock. macOS asks for permission; open System Settings → Privacy & Security → Accessibility and turn on AlwaysDock. On macOS 27 that list is called **Device Control and Data Access** instead of Accessibility. Turning it on takes an administrator's name and password. Until access is granted, the menu item shows a dash instead of a check mark, a line below it reads "No Accessibility access: AppleScript apps only" (see [Without Accessibility access](#without-accessibility-access)), and an **Open Accessibility Settings…** item jumps straight to the right list. Once access is granted, AlwaysDock switches to Accessibility on its own, without relaunching the app.
 
 You can also open the list from Terminal:
 
@@ -122,17 +128,21 @@ You can also open the list from Terminal:
 open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility"
 ```
 
-**After a rebuild:** `build.sh` signs the app ad-hoc, so after every build macOS treats it as a new app and the old Accessibility grant stops working. The switch in System Settings may still show as on but has no effect. Remove AlwaysDock from the list (the − button) and grant access again, or reset the stale entry from Terminal and let AlwaysDock ask again:
+**After a rebuild:** builds signed with the same identity keep the grant (see [Build and run](#build-and-run)). A build signed with another identity, or ad hoc, is a new app to macOS and the old grant stops working: the switch in System Settings may still show as on but has no effect. Remove AlwaysDock from the list (the − button) and grant access again, or reset the stale entry from Terminal and let AlwaysDock ask again:
 
 ```bash
 tccutil reset Accessibility io.dogy.AlwaysDock
 ```
 
-If you have a code signing certificate, build with it and the grant survives rebuilds:
+#### Without Accessibility access
 
-```bash
-SIGN_IDENTITY="Apple Development: Your Name (XXXXXXXXXX)" ./build.sh --install
-```
+Without admin rights you cannot grant Accessibility access. Reserve Space for Dock then asks each app to resize its own window through AppleScript (Apple Events), which needs no admin rights:
+
+- When Reserve Space for Dock starts, macOS asks, one app at a time, whether AlwaysDock may control each running app that supports AppleScript. Click **Allow**. An app opened later is asked the first time you zoom, tile or resize one of its windows under the dock, never for windows that merely show up there, such as when you switch Spaces. Each app is asked only once, and you can change your answer in System Settings → Privacy & Security → Automation.
+- These permissions survive rebuilds, whatever the build is signed with.
+- Only apps that support AppleScript can be asked, such as Finder, Safari, Google Chrome, Terminal, TextEdit, Xcode and Microsoft Office. Most Electron apps (VS Code, Slack, Discord) and many others do not support it; their windows stay as they are, and AlwaysDock does not ask for permission to control them.
+- Zoom, Fill, tiling and dragging a window edge with the mouse are noticed as soon as you release the mouse button, once the window has finished animating. Changes made from the keyboard, such as tiling shortcuts, are noticed within about two seconds.
+- As with Accessibility, plain moves are left alone, and full-screen windows are never touched.
 
 ## How it works
 
@@ -140,6 +150,7 @@ SIGN_IDENTITY="Apple Development: Your Name (XXXXXXXXXX)" ./build.sh --install
 - Pinned apps are read from the `persistent-apps` key in `com.apple.dock`. Running apps come from `NSWorkspace` and are followed through KVO instead of being polled, since reading an app's details is a round trip to LaunchServices.
 - To find the display the system Dock is on, AlwaysDock looks for the display whose `visibleFrame` is inset on the bottom, left or right edge.
 - A display counts as full screen when an on-screen window below the dock's level covers all of it (`CGWindowListCopyWindowInfo`), leaving out the strip beside the camera housing on displays that have one. Apps that hide the Dock are found through `NSApplication.currentSystemPresentationOptions`. A dock out of view stays ordered in, transparent and click-through, because each dock is one window on every Space: while macOS slides between Spaces, the window list reports the dock moving along with one of them, and AlwaysDock judges full screen on that Space, from the windows that move with the dock. That is how the dock leaves with the desktop and comes back with it. The window list is checked once a second, and every 50 ms for a second after a Space change, a change in presentation options, or a change in a dock's occlusion state (the dock is covered or uncovered as a slide starts, and as it leaves the screen). While a dock auto-hides, AlwaysDock checks the pointer position ten times a second.
+- Without Accessibility access, Reserve Space for Dock reads window sizes from the window list (`CGWindowListCopyWindowInfo`), which needs no permission, once a second and twice after the mouse button comes up in another app (a global event monitor, which needs no permission for mouse events). A window is fitted once its new size holds still between two checks, so it is never fought while it animates. It is then found among its app's windows by its frame and resized by setting its AppleScript `bounds`, sent as raw Apple Events off the main thread. Only apps whose `Info.plist` declares AppleScript support (`NSAppleScriptEnabled` or `OSAScriptingDefinition`) are asked. Two other admin-free routes were tried and do not work: setting the Dock's area in the window server directly (apps already running only take it from the Dock process, which announces its own area again whenever an app opens or quits), and the Shortcuts actions Move Window and Resize Window (they run without error but leave the window as it was).
 - Hide System Dock uses a well-known trick: turn on auto-hide with a 1000-second delay (`autohide-delay`) and restart the Dock. Your original values are saved and restored when you turn the option off or quit the app. Both changes are logged under the `io.dogy.AlwaysDock` subsystem, which you can follow in Console.
 
 ## Limitations
@@ -167,8 +178,9 @@ defaults delete com.apple.dock autohide-delay; defaults write com.apple.dock aut
 | `Sources/AlwaysDock/SystemDock.swift` | Reads the system Dock's settings; hides and restores the system Dock. |
 | `Sources/AlwaysDock/FullScreen.swift` | Auto-Hide in Full Screen: finds displays that a window fills. |
 | `Sources/AlwaysDock/WindowGuard.swift` | Reserve Space for Dock: watches other apps' windows through the Accessibility API and shrinks them. |
+| `Sources/AlwaysDock/ScriptedWindows.swift` | Reserve Space for Dock without Accessibility access: finds resized windows in the window list and has apps that support AppleScript shrink them. |
 | `Sources/AlwaysDock/Settings.swift` | Stores user settings. |
-| `build.sh` | Packages `build/AlwaysDock.app` (signed ad-hoc, or with `SIGN_IDENTITY`). With `--install [DIR]`: quits the running copy cleanly, installs into `/Applications` (or `~/Applications`, or `DIR`) and launches it. |
+| `build.sh` | Packages `build/AlwaysDock.app`, signed with a self-signed identity it makes on first use (or with `SIGN_IDENTITY`). With `--install [DIR]`: quits the running copy cleanly, installs into `/Applications` (or `~/Applications`, or `DIR`) and launches it. |
 | `Resources/AppIcon.icns` | The app icon. |
 | `Scripts/make-icon.swift` | Draws the icon in code and regenerates `AppIcon.icns`: `swift Scripts/make-icon.swift`. |
 | `docs/icon.png` | The icon as a PNG, for this README. |
