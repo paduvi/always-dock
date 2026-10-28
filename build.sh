@@ -65,6 +65,12 @@ else
         rm -r "$TMP"
         echo "Created the signing identity \"$LOCAL_IDENTITY\" in $KEYCHAIN"
     fi
+    # codesign finds the identity only when its keychain is in the user's search list, even with --keychain.
+    SEARCH_LIST=()
+    while read -r kc; do kc="${kc#\"}"; SEARCH_LIST+=("${kc%\"}"); done < <(security list-keychains -d user)
+    if [[ ! " ${SEARCH_LIST[*]} " == *" $KEYCHAIN "* ]]; then
+        security list-keychains -d user -s "${SEARCH_LIST[@]}" "$KEYCHAIN"
+    fi
     security unlock-keychain -p "" "$KEYCHAIN"
     codesign --force --keychain "$KEYCHAIN" --sign "$LOCAL_IDENTITY" "$APP" >/dev/null
 fi
